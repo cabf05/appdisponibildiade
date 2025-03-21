@@ -3,126 +3,187 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
+import plotly.express as px
+from statsmodels.tsa.seasonal import seasonal_decompose
+from io import BytesIO
+import calendar
 
-# Configuração da interface
-st.title("Análise de Disponibilidade de Parques Eólicos")
+# Configuração da página
+st.set_page_config(page_title="Análise Avançada de Parques Eólicos", layout="wide")
 
-# Barra lateral para inputs
-st.sidebar.header("Parâmetros")
-fator_multa = st.sidebar.number_input("Fator Multa", min_value=0.0, value=1.0, step=0.1)
-disp_contratual = st.sidebar.number_input("Disponibilidade Contratual (%)", min_value=0.0, max_value=100.0, value=95.0, step=0.1)
-fator_bonus = st.sidebar.number_input("Fator Bônus", min_value=0.0, value=0.5, step=0.1)
-pmd = st.sidebar.number_input("PMD", min_value=0.0, value=100.0, step=1.0)
-mwh_por_wtg = st.sidebar.number_input("MWh por WTG", min_value=0.0, value=500.0, step=10.0)
+# Sidebar: Inputs e Upload
+with st.sidebar:
+    st.header("Parâmetros Contratuais")
+    fator_multa = st.number_input("Fator Multa", min_value=0.0, value=1.0, step=0.1)
+    disp_contratual = st.number_input("Disponibilidade Contratual (%)", min_value=0.0, 
+                                     max_value=100.0, value=95.0, step=0.1)
+    fator_bonus = st.number_input("Fator Bônus", min_value=0.0, value=0.5, step=0.1)
+    pmd = st.number_input("PMD (R$/MWh)", min_value=0.0, value=150.0)
+    mwh_por_wtg = st.number_input("MWh por WTG/dia", min_value=0.0, value=3.5)
+    
+    st.header("Configurações de Análise")
+    window_size = st.number_input("Períodos para Média Móvel", min_value=1, max_value=36, value=12)
+    n_bootstrap = st.number_input("Amostras Bootstrap", min_value=100, max_value=10000, value=1000)
+    
+    uploaded_file = st.file_uploader("Upload da Planilha (XLSX)", type=["xlsx"])
 
-# Upload da planilha
-uploaded_file = st.file_uploader("Carregue sua planilha Excel", type=["xlsx"])
-if uploaded_file is not None:
-    # Ler a planilha
+# Processamento de Dados
+@st.cache_data
+def process_data(uploaded_file):
+    if uploaded_file is None:
+        return None
+    
     df = pd.read_excel(uploaded_file)
     
-    # Converter colunas de data para formato datetime
-    date_cols = [col for col in df.columns if col not in ['Windfarm', 'WTGs']]
-    for col in date_cols:
-        df[col] = pd.to_datetime(df[col], format='%m/%d/%Y', errors='coerce')
+    # Verificar estrutura
+    required_cols = ["Windfarm", "WTGs"]
+    if not all(col in df.columns for col in required_cols):
+        raise ValueError("Colunas obrigatórias não encontradas")
     
-    # Organizar dados
-    windfarms = df['Windfarm'].unique()
-    st.subheader("Resultados por Parque Eólico")
+    # Processar datas
+    date_columns = [col for col in df.columns if '/' in col and len(col.split('/')) == 3]
+    df_dates = df.melt(id_vars=required_cols, value_vars=date_columns, 
+                      var_name="Data", value_name="Disponibilidade")
     
-    for windfarm in windfarms:
-        st.write(f"### {windfarm}")
-        wf_data = df[df['Windfarm'] == windfarm].iloc[0]
-        wtgs = wf_data['WTGs']
+    try:
+        df_dates['Data'] = pd.to_datetime(df_dates['Data'], format='%m/%d/%Y')
+    except:
+        st.error("Formato de data inválido. Use MM/DD/YYYY")
+        return None
+    
+    df_dates['Ano'] = df_dates['Data'].dt.year
+    df_dates['Mês'] = df_dates['Data'].dt.month
+    df_dates['Mês_Ano'] = df_dates['Data'].dt.to_period('M')
+    
+    # Calcular métricas anuais
+    df_anual = df_dates.groupby(['Windfarm', 'Ano']).agg(
+        Disponibilidade_Anual=('Disponibilidade', 'mean'),
+        WTGs=('WTGs', 'first'),
+        Meses_Coletados=('Disponibilidade', 'count')
+    ).reset_index()
+    
+    # Calcular métricas móveis
+    df_dates['Media_Movel'] = df_dates.groupby('Windfarm')['Disponibilidade'] \
+                                     .transform(lambda x: x.rolling(window=window_size).mean())
+    
+    return df_dates, df_anual
+
+# Funções de Análise
+def fit_best_distribution(data):
+    dist_names = ['norm', 'lognorm', 'beta', 'weibull_min']
+    results = []
+    
+    for dist_name in dist_names:
+        dist = getattr(stats, dist_name)
+        try:
+            params = dist.fit(data)
+            aic = dist.aic(params, data)
+            results.append((dist_name, aic))
+        except:
+            continue
+    
+    if not results:
+        return None
+    results.sort(key=lambda x: x[1])
+    return results[0][0]
+
+def bootstrap_probability(data, threshold, n_samples):
+    probs = []
+    for _ in range(n_samples):
+        sample = np.random.choice(data, size=len(data), replace=True)
+        probs.append(np.mean(sample < threshold))
+    return np.percentile(probs, [2.5, 97.5])
+
+# Interface Principal
+if uploaded_file:
+    try:
+        df_dates, df_anual = process_data(uploaded_file)
+        windfarms = df_dates['Windfarm'].unique()
+        selected_windfarm = st.selectbox("Selecione o Parque Eólico", windfarms)
         
-        # Extrair disponibilidades mensais
-        disp_mensal = wf_data[date_cols].values
-        anos = pd.to_datetime(date_cols).year.unique()
+        df_windfarm = df_dates[df_dates['Windfarm'] == selected_windfarm]
+        df_anual_windfarm = df_anual[df_anual['Windfarm'] == selected_windfarm]
         
-        # Calcular médias anuais
-        medias_anuais = {}
-        for ano in anos:
-            cols_ano = [col for col in date_cols if pd.to_datetime(col).year == ano]
-            medias_anuais[ano] = np.mean(wf_data[cols_ano])
+        # Abas de Análise
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "Visão Anual", 
+            "Análise Temporal", 
+            "Impacto Energético",
+            "Modelagem Probabilística"
+        ])
         
-        # Exibir médias anuais
-        st.write("#### Médias Anuais de Disponibilidade (%)")
-        st.write(pd.Series(medias_anuais))
+        with tab1:
+            st.subheader("Desempenho Anual")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric("Média Histórica", f"{df_anual_windfarm['Disponibilidade_Anual'].mean():.1f}%")
+                st.dataframe(df_anual_windfarm.set_index('Ano'))
+                
+            with col2:
+                fig = px.bar(df_anual_windfarm, x='Ano', y='Disponibilidade_Anual',
+                            title="Disponibilidade Anual vs Contratual",
+                            labels={'Disponibilidade_Anual': 'Disponibilidade (%)'})
+                fig.add_hline(y=disp_contratual, line_dash="dot", 
+                             annotation_text=f"Contratual: {disp_contratual}%")
+                st.plotly_chart(fig, use_container_width=True)
         
-        # Estatísticas adicionais
-        disp_anuais = list(medias_anuais.values())
-        stats_dict = {
-            "Mediana (%)": np.median(disp_anuais),
-            "Desvio Padrão (%)": np.std(disp_anuais),
-            "Mínimo (%)": np.min(disp_anuais),
-            "Máximo (%)": np.max(disp_anuais)
-        }
-        st.write("#### Estatísticas das Disponibilidades Anuais")
-        st.write(pd.Series(stats_dict))
+        with tab2:
+            st.subheader("Análise Temporal Detalhada")
+            
+            fig, ax = plt.subplots(figsize=(12, 6))
+            df_windfarm.set_index('Data')['Disponibilidade'].plot(ax=ax, label='Mensal')
+            df_windfarm.set_index('Data')['Media_Movel'].plot(ax=ax, label=f'Média Móvel ({window_size} meses)')
+            ax.axhline(disp_contratual, color='r', linestyle='--', label='Contratual')
+            ax.set_title("Série Temporal de Disponibilidade")
+            ax.legend()
+            st.pyplot(fig)
+            
+            st.subheader("Decomposição Sazonal")
+            decomposition = seasonal_decompose(df_windfarm.set_index('Data')['Disponibilidade'], model='additive')
+            fig = decomposition.plot()
+            st.pyplot(fig)
         
-        # Ajuste de distribuição para disponibilidades mensais
-        distribs = {'Normal': stats.norm, 'Log-Normal': stats.lognorm, 'Weibull': stats.weibull_min}
-        best_dist = None
-        best_pvalue = 0
-        for name, dist in distribs.items():
-            if name == 'Log-Normal':
-                params = dist.fit(disp_mensal, floc=0)
-            elif name == 'Weibull':
-                params = dist.fit(disp_mensal, floc=0)
+        with tab3:
+            st.subheader("Impacto Financeiro")
+            df_anual_windfarm['Perda_Energia'] = ((disp_contratual - df_anual_windfarm['Disponibilidade_Anual'])/100 * 
+                                                df_anual_windfarm['WTGs'] * mwh_por_wtg * 365)
+            df_anual_windfarm['Perda_Monetaria'] = df_anual_windfarm['Perda_Energia'] * pmd
+            
+            st.dataframe(df_anual_windfarm[['Ano', 'Perda_Energia', 'Perda_Monetaria']].set_index('Ano'))
+            
+            fig = px.scatter(df_anual_windfarm, x='Disponibilidade_Anual', y='Perda_Monetaria',
+                            trendline="ols", title="Correlação Disponibilidade vs Perdas")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with tab4:
+            st.subheader("Modelagem Probabilística")
+            
+            best_dist = fit_best_distribution(df_windfarm['Disponibilidade'])
+            prob_mes = stats.percentileofscore(df_windfarm['Disponibilidade'], disp_contratual)/100
+            
+            if best_dist:
+                dist = getattr(stats, best_dist)
+                params = dist.fit(df_windfarm['Disponibilidade'])
+                prob_mes_dist = dist.cdf(disp_contratual, *params)
+                ci = bootstrap_probability(df_windfarm['Disponibilidade'], disp_contratual, n_bootstrap)
+                
+                st.markdown(f"""
+                **Melhor Distribuição Ajustada:** `{best_dist}`  
+                **Probabilidade Mensal (Distribuição):** {prob_mes_dist:.1%}  
+                **Probabilidade Mensal (Empírica):** {prob_mes:.1%}  
+                **Intervalo de Confiança 95% (Empírico):** [{ci[0]:.1%} - {ci[1]:.1%}]
+                """)
             else:
-                params = dist.fit(disp_mensal)
-            ks_stat, p_value = stats.kstest(disp_mensal, name.lower(), args=params)
-            if p_value > best_pvalue:
-                best_pvalue = p_value
-                best_dist = (name, dist, params)
-        
-        # Calcular probabilidades mensais
-        if best_pvalue > 0.05:  # Ajuste aceitável
-            dist_name, dist, params = best_dist
-            prob_mensal = dist.cdf(disp_contratual, *params)
-            confianca = "Alta (p-valor > 0.05)"
-        else:  # Método alternativo (não paramétrico)
-            prob_mensal = np.mean(disp_mensal < disp_contratual)
-            confianca = "Média (método não paramétrico)"
-        
-        st.write(f"#### Probabilidade Mensal de Disponibilidade < {disp_contratual}%")
-        st.write(f"Probabilidade: {prob_mensal:.2%} (Confiança: {confianca})")
-        
-        # Probabilidade anual
-        if len(disp_anuais) > 5:  # Necessário número mínimo de anos
-            params_anual = stats.norm.fit(disp_anuais)
-            prob_anual = stats.norm.cdf(disp_contratual, *params_anual)
-            confianca_anual = "Alta (assumindo normalidade)"
-        else:
-            prob_anual = np.mean(np.array(disp_anuais) < disp_contratual)
-            confianca_anual = "Média (método não paramétrico)"
-        
-        st.write(f"#### Probabilidade Anual de Disponibilidade < {disp_contratual}%")
-        st.write(f"Probabilidade: {prob_anual:.2%} (Confiança: {confianca_anual})")
-        
-        # Calcular multas e bônus
-        st.write("#### Multas e Bônus por Ano")
-        resultados = {}
-        for ano, disp in medias_anuais.items():
-            if disp < disp_contratual:
-                multa = fator_multa * pmd * mwh_por_wtg * wtgs * (disp_contratual / disp - 1)
-                resultados[ano] = f"Multa: R${multa:,.2f}"
-            elif disp > disp_contratual:
-                bonus = fator_bonus * pmd * mwh_por_wtg * wtgs * (disp / disp_contratual - 1)
-                resultados[ano] = f"Bônus: R${bonus:,.2f}"
-            else:
-                resultados[ano] = "Neutro"
-        st.write(pd.Series(resultados))
-        
-        # Gráfico das disponibilidades anuais
-        fig, ax = plt.subplots()
-        ax.plot(list(medias_anuais.keys()), list(medias_anuais.values()), marker='o')
-        ax.axhline(disp_contratual, color='r', linestyle='--', label='Disp. Contratual')
-        ax.set_title(f"Disponibilidade Anual - {windfarm}")
-        ax.set_xlabel("Ano")
-        ax.set_ylabel("Disponibilidade (%)")
-        ax.legend()
-        st.pyplot(fig)
+                st.warning("Nenhuma distribuição adequada encontrada. Usando método empírico.")
+                st.write(f"Probabilidade Mensal: {prob_mes:.1%}")
+            
+            st.subheader("Análise de Risco Anual")
+            prob_ano_emp = np.mean(df_anual_windfarm['Disponibilidade_Anual'] < disp_contratual)
+            st.write(f"Probabilidade Anual (Histórica): {prob_ano_emp:.1%}")
+            
+    except Exception as e:
+        st.error(f"Erro no processamento: {str(e)}")
 
 else:
-    st.write("Por favor, faça o upload da planilha para iniciar a análise.")
+    st.info("Faça upload da planilha para iniciar a análise.")
