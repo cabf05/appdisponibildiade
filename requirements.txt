@@ -1,9 +1,5 @@
 streamlit>=1.27.0
-pandas>=2.0.3,<2.1.0  # Evita 2.1.0 por incompatibilidade com Python 3.12
-numpy>=1.22.0,<2.0.0  # Garante compatibilidade com Pandas
-matplotlib>=3.8.0
+pandas>=2.0.3,<2.1.0
+numpy>=1.22.0,<2.0.0
 plotly>=5.18.0
-statsmodels>=0.14.0
 openpyxl>=3.1.2
-pillow>=9.5.0  # Versão recente com suporte a wheels
-scipy>=1.11.0
