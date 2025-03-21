@@ -1,135 +1,84 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from io import BytesIO
 
-# Configuração inicial do Streamlit
-st.set_page_config(page_title="Análise de Disponibilidade Eólica", layout="wide")
+# Configuração da página
+st.set_page_config(page_title="Análise de Disponibilidade de Parques Eólicos", layout="wide")
 
-# Função para carregar os dados
-@st.cache_data
-def load_data(uploaded_file):
-    try:
-        df = pd.read_excel(uploaded_file, engine='openpyxl')
-        df.columns = df.columns.astype(str)
-        return df
-    except Exception as e:
-        st.error(f"Erro ao carregar arquivo: {e}")
-        return None
-
-# Função para pré-processar os dados
-def preprocess_data(df):
-    df = df.copy()
-    # Converter colunas de data para valores numéricos (disponibilidade)
-    date_columns = [col for col in df.columns if col not in ['Windfarm', 'WTGs']]
-    df[date_columns] = df[date_columns].apply(pd.to_numeric, errors='coerce')
-    return df
-
-# Função para calcular métricas principais
-def calcular_metricas(df, disponibilidade_contratual, fator_multa, fator_bonus, pmd, mwh_por_wtg_ano):
-    metricas = []
-    total_multa_projeto = 0
-    total_bonus_projeto = 0
-
-    # Identificar anos nas colunas de data
-    date_columns = [col for col in df.columns if col not in ['Windfarm', 'WTGs']]
-    df_dates = pd.to_datetime(date_columns)
-    anos = df_dates.year.unique()
-
-    for ano in anos:
-        colunas_ano = [col for col in date_columns if pd.to_datetime(col).year == ano]
-        for parque in df['Windfarm'].unique():
-            df_parque = df[df['Windfarm'] == parque]
-            wtgs = df_parque['WTGs'].iloc[0]
-            disponibilidades = df_parque[colunas_ano].mean(axis=1).iloc[0]
-            media_anual = disponibilidades
-
-            mwh_anual_parque = mwh_por_wtg_ano * wtgs
-
-            if media_anual < disponibilidade_contratual:
-                multa = fator_multa * pmd * mwh_anual_parque * ((disponibilidade_contratual / media_anual) - 1)
-                bonus = 0
-            else:
-                bonus = fator_bonus * pmd * mwh_anual_parque * ((media_anual / disponibilidade_contratual) - 1)
-                multa = 0
-
-            total_multa_projeto += multa
-            total_bonus_projeto += bonus
-
-            metricas.append({
-                "Parque": parque,
-                "Ano": ano,
-                "Disponibilidade Média Anual (%)": round(media_anual, 2),
-                "MWh Anual": round(mwh_anual_parque, 2),
-                "Multa (R$)": round(multa, 2),
-                "Bônus (R$)": round(bonus, 2),
-            })
-
-    df_metricas = pd.DataFrame(metricas)
-    df_metricas["Total Multa Projeto (R$)"] = round(total_multa_projeto, 2)
-    df_metricas["Total Bônus Projeto (R$)"] = round(total_bonus_projeto, 2)
+# Função para processar a planilha
+def processar_dados(arquivo):
+    df = pd.read_excel(arquivo, sheet_name="Sheet1")
     
-    return df_metricas
+    # Converter colunas de datas para formato longo
+    id_vars = ["Windfarm", "WTGs"]
+    value_vars = df.columns[2:]
+    df_melted = df.melt(id_vars=id_vars, value_vars=value_vars, var_name="Data", value_name="Disponibilidade")
+    
+    # Extrair ano e mês
+    df_melted["Data"] = pd.to_datetime(df_melted["Data"])
+    df_melted["Ano"] = df_melted["Data"].dt.year
+    df_melted["Mês"] = df_melted["Data"].dt.month
+    
+    return df_melted
 
-# Função para calcular probabilidade empírica de multa do projeto
-def calcular_prob_empirica_multa(df_metricas, valor_multa_desejado):
-    multas_anuais = df_metricas.groupby('Ano')['Multa (R$)'].sum()
-    prob = (multas_anuais > valor_multa_desejado).mean()
-    return prob
+# Carregar arquivo
+arquivo = st.file_uploader("Carregue a planilha de disponibilidade (formato idêntico ao exemplo)", type="xlsx")
+if not arquivo:
+    st.stop()
 
-# Interface do Streamlit
-st.title("📊 Análise de Disponibilidade de Parques Eólicos")
+df = processar_dados(arquivo)
 
-# Sidebar para configurações
-st.sidebar.header("Configurações")
-uploaded_file = st.sidebar.file_uploader("📂 Faça o upload da planilha Excel", type=["xlsx"])
-disponibilidade_contratual = st.sidebar.slider("Disponibilidade Contratual (%)", 80, 100, 95)
-fator_multa = st.sidebar.number_input("Fator de Multa", min_value=0.0, value=1.5)
-fator_bonus = st.sidebar.number_input("Fator de Bônus", min_value=0.0, value=1.2)
-pmd = st.sidebar.number_input("PMD (R$/MWh)", min_value=0.0, value=300.0)
-mwh_por_wtg_ano = st.sidebar.number_input("MWh por WTG por Ano", min_value=0.0, value=730.0)
-valor_multa_desejado = st.sidebar.number_input("Valor de Multa para Probabilidade (R$)", min_value=0.0, value=100000.0)
+# Tabela 1: Número de WTGs por Parque e Total
+st.header("1. Número de WTGs por Parque Eólico")
+tabela_wtgs = df.groupby("Windfarm")["WTGs"].first().reset_index()
+total_wtgs = tabela_wtgs["WTGs"].sum()
+st.markdown(f"**Total Geral de WTGs:** {total_wtgs}")
+st.dataframe(tabela_wtgs)
 
-# Processamento após upload
-if uploaded_file:
-    df = load_data(uploaded_file)
-    df = preprocess_data(df)
+# Tabela 2: Disponibilidade por Ano e Mês por Parque
+st.header("2. Disponibilidade por Ano e Mês")
+tabela_disponibilidade = df.pivot_table(
+    index=["Windfarm", "Ano"],
+    columns="Mês",
+    values="Disponibilidade",
+    aggfunc="mean"
+).reset_index()
+st.dataframe(tabela_disponibilidade)
 
-    if df is not None:
-        st.write("### 🔍 Pré-visualização dos Dados")
-        st.dataframe(df.head())
+# Tabela 3: Disponibilidade Média por Ano por Parque
+st.header("3. Disponibilidade Média por Ano")
+tabela_media_anual = df.groupby(["Windfarm", "Ano"])["Disponibilidade"].mean().reset_index()
+st.dataframe(tabela_media_anual)
 
-        # Cálculo de métricas
-        df_metricas = calcular_metricas(df, disponibilidade_contratual, fator_multa, fator_bonus, pmd, mwh_por_wtg_ano)
+# Tabela 4: Desvio Padrão por Ano por Parque
+st.header("4. Desvio Padrão por Ano")
+tabela_std_anual = df.groupby(["Windfarm", "Ano"])["Disponibilidade"].std().reset_index()
+st.dataframe(tabela_std_anual)
 
-        # Exibir métricas
-        st.write("### 📈 Métricas dos Parques Eólicos")
-        st.dataframe(df_metricas)
+# Tabela 5: Cálculo (Contrato / Média Anual) - 1
+st.header("5. Cálculo de Penalidade Base")
+contrato = st.number_input("Disponibilidade de Contrato (%)", min_value=0.0, max_value=100.0, value=95.0)
+merged = pd.merge(tabela_media_anual, tabela_wtgs, on="Windfarm")
+merged["Tabela5"] = (contrato / merged["Disponibilidade"] - 1).round(4)
+merged["Tabela5"] = merged["Tabela5"].apply(lambda x: max(x, 0))  # Substituir negativos por 0
+st.dataframe(merged[["Windfarm", "Ano", "Tabela5"]])
 
-        # Total do projeto
-        total_multa = df_metricas["Total Multa Projeto (R$)"].iloc[0]
-        total_bonus = df_metricas["Total Bônus Projeto (R$)"].iloc[0]
-        st.write(f"#### Total Anual do Projeto")
-        st.write(f"- **Multa Total**: R$ {total_multa:,.2f}")
-        st.write(f"- **Bônus Total**: R$ {total_bonus:,.2f}")
+# Tabela 6: Cálculo da Multa
+st.header("6. Cálculo da Multa por Parque")
+fator_multa = st.number_input("Fator de Multa (R$ por WTG)", min_value=0.0, value=1000.0)
+merged["Tabela6"] = merged["Tabela5"] * fator_multa * merged["WTGs"]
+st.dataframe(merged[["Windfarm", "Ano", "Tabela6"]])
 
-        # Explicação do cálculo de multa e bônus
-        st.write("### Cálculo de Multa e Bônus")
-        st.write("""
-        - **Multa**: Se a disponibilidade média anual do parque for menor que a disponibilidade contratual, a multa é calculada como:
-        \[
-        \text{Multa} = \text{fator_multa} \times \text{PMD} \times \text{MWh_anual} \times \left( \frac{\text{disponibilidade_contratual}}{\text{disponibilidade_média}} - 1 \right)
-        \]
-        - **Bônus**: Se a disponibilidade média anual do parque for maior ou igual à disponibilidade contratual, o bônus é calculado como:
-        \[
-        \text{Bônus} = \text{fator_bônus} \times \text{PMD} \times \text{MWh_anual} \times \left( \frac{\text{disponibilidade_média}}{\text{disponibilidade_contratual}} - 1 \right)
-        \]
-        """)
+# Soma Total de Multas por Ano
+st.header("7. Soma Total de Multas por Ano")
+soma_multa_ano = merged.groupby("Ano")["Tabela6"].sum().reset_index()
+st.dataframe(soma_multa_ano)
 
-        # Probabilidade empírica de multa do projeto
-        prob_multa = calcular_prob_empirica_multa(df_metricas, valor_multa_desejado)
-        st.write(f"### Probabilidade de Multa Total do Projeto Superior a R$ {valor_multa_desejado:,.2f}")
-        st.write(f"Probabilidade: **{prob_multa * 100:.2f}%**")
-        st.write("*Esta probabilidade é calculada com base na frequência histórica de anos em que a soma das multas dos parques ultrapassou o valor especificado.*")
-
-else:
-    st.warning("📌 Por favor, faça o upload de um arquivo Excel para iniciar a análise.")
+# Probabilidade Empírica de Multa > Valor Alvo
+st.header("8. Probabilidade de Multa Total > Valor Alvo")
+valor_alvo = st.number_input("Valor Alvo (R$)", min_value=0.0, value=50000.0)
+historico = soma_multa_ano["Tabela6"].values
+excedeu = sum(historico > valor_alvo)
+probabilidade = excedeu / len(historico) * 100 if len(historico) > 0 else 0
+st.markdown(f"**Probabilidade Empírica:** {probabilidade:.2f}%")
