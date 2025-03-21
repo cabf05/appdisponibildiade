@@ -114,14 +114,14 @@ def main():
 
     # Tabela 5: Cálculo de Penalidade
     st.header("5. Cálculo de Penalidade")
-    contrato = st.number_input("Disponibilidade de Contrato (%)", 0.0, 100.0, 95.0, key="contrato")
+    contrato = st.number_input("Disponibilidade de Contrato (%)", 0.0, 100.0, 98.5, key="contrato")
     merged = pd.merge(tabela_media_anual, tabela_wtgs, on="Windfarm")
     merged["Tabela5"] = (contrato / merged["Disponibilidade"] - 1).round(4).apply(lambda x: max(x, 0))
     st.dataframe(merged[["Windfarm", "Ano", "Tabela5"]], use_container_width=True)
 
     # Tabela 6: Cálculo da Multa
     st.header("6. Cálculo da Multa")
-    fator_multa = st.number_input("Fator de Multa (R$ por WTG)", 0.0, 100000.0, 1000.0, key="fator_multa")
+    fator_multa = st.number_input("Fator de Multa (R$ por WTG)", 0.0, 1000000000.0, 1545264.0, key="fator_multa")
     merged["Tabela6"] = merged["Tabela5"] * fator_multa * merged["WTGs"]
     st.dataframe(merged[["Windfarm", "Ano", "Tabela6"]], use_container_width=True)
 
