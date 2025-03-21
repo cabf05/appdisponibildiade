@@ -47,15 +47,22 @@ def main():
     st.markdown(f"**Total Geral de WTGs:** {total_wtgs}")
     st.dataframe(tabela_wtgs, use_container_width=True)
 
-    # Tabela 2: Disponibilidade Mensal
+    # Tabela 2: Disponibilidade Mensal (Corrigida)
     st.header("2. Disponibilidade por Ano e Mês")
     tabela_mensal = df.pivot_table(
         index=["Windfarm", "Ano"],
         columns="Mês",
         values="Disponibilidade",
         aggfunc="mean"
-    ).reset_index()
-    st.dataframe(tabela_mensal.style.format("{:.2f}"), use_container_width=True)
+    ).reset_index().round(2)
+    
+    # Renomear colunas de mês
+    tabela_mensal.columns = [
+        f"Mês {col}" if isinstance(col, int) else col 
+        for col in tabela_mensal.columns
+    ]
+    
+    st.dataframe(tabela_mensal, use_container_width=True)
 
     # Tabela 3: Média Anual
     st.header("3. Disponibilidade Média Anual")
@@ -122,7 +129,7 @@ def main():
             "Windfarm": parque,
             "WTGs": wtgs,
             "Média": media,
-            "Desvio Padrão": std if not np.isnan(std) else 0.1  # Evitar NaN
+            "Desvio Padrão": std if not np.isnan(std) else 0.1
         })
 
     # Executar simulação
