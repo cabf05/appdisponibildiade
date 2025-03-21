@@ -1,11 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import scipy.stats as stats
-from statsmodels.tsa.seasonal import seasonal_decompose
 
-# Configuração inicial
+# Configuração inicial do Streamlit
 st.set_page_config(page_title="Análise de Disponibilidade Eólica", layout="wide")
 
 # Função para carregar os dados
@@ -22,48 +19,50 @@ def load_data(uploaded_file):
 # Função para pré-processar os dados
 def preprocess_data(df):
     df = df.copy()
-    for col in df.columns[2:]:
-        df[col] = pd.to_numeric(df[col], errors='coerce')  # Ignora valores inválidos
+    # Converter colunas de data para valores numéricos (disponibilidade)
+    date_columns = [col for col in df.columns if col not in ['Windfarm', 'WTGs']]
+    df[date_columns] = df[date_columns].apply(pd.to_numeric, errors='coerce')
     return df
 
 # Função para calcular métricas principais
-def calcular_metricas(df, disponibilidade_contratual, fator_multa, fator_bonus, pmd, mwh_por_wtg, num_wtg):
+def calcular_metricas(df, disponibilidade_contratual, fator_multa, fator_bonus, pmd, mwh_por_wtg_ano):
     metricas = []
     total_multa_projeto = 0
     total_bonus_projeto = 0
 
-    for parque in df['Windfarm'].unique():
-        df_parque = df[df['Windfarm'] == parque].iloc[:, 2:]
-        df_parque_clean = df_parque.dropna(axis=1, how='all')
-        
-        if df_parque_clean.empty:
-            continue
-        
-        # Disponibilidade média anual do parque
-        media_anual = df_parque_clean.mean().mean()
-        
-        # Cálculo do MWh anual por parque
-        mwh_anual_por_wtg = mwh_por_wtg * 365  # 365 dias no ano
-        mwh_anual_parque = mwh_anual_por_wtg * num_wtg
-        
-        # Cálculo de multa ou bônus
-        if media_anual < disponibilidade_contratual:
-            multa = fator_multa * pmd * mwh_anual_parque * ((disponibilidade_contratual / media_anual) - 1)
-            bonus = 0
-        else:
-            bonus = fator_bonus * pmd * mwh_anual_parque * ((media_anual / disponibilidade_contratual) - 1)
-            multa = 0
-        
-        total_multa_projeto += multa
-        total_bonus_projeto += bonus
-        
-        metricas.append({
-            "Parque": parque,
-            "Disponibilidade Média Anual (%)": round(media_anual, 2),
-            "MWh Anual": round(mwh_anual_parque, 2),
-            "Multa (R$)": round(multa, 2),
-            "Bônus (R$)": round(bonus, 2),
-        })
+    # Identificar anos nas colunas de data
+    date_columns = [col for col in df.columns if col not in ['Windfarm', 'WTGs']]
+    df_dates = pd.to_datetime(date_columns)
+    anos = df_dates.year.unique()
+
+    for ano in anos:
+        colunas_ano = [col for col in date_columns if pd.to_datetime(col).year == ano]
+        for parque in df['Windfarm'].unique():
+            df_parque = df[df['Windfarm'] == parque]
+            wtgs = df_parque['WTGs'].iloc[0]
+            disponibilidades = df_parque[colunas_ano].mean(axis=1).iloc[0]
+            media_anual = disponibilidades
+
+            mwh_anual_parque = mwh_por_wtg_ano * wtgs
+
+            if media_anual < disponibilidade_contratual:
+                multa = fator_multa * pmd * mwh_anual_parque * ((disponibilidade_contratual / media_anual) - 1)
+                bonus = 0
+            else:
+                bonus = fator_bonus * pmd * mwh_anual_parque * ((media_anual / disponibilidade_contratual) - 1)
+                multa = 0
+
+            total_multa_projeto += multa
+            total_bonus_projeto += bonus
+
+            metricas.append({
+                "Parque": parque,
+                "Ano": ano,
+                "Disponibilidade Média Anual (%)": round(media_anual, 2),
+                "MWh Anual": round(mwh_anual_parque, 2),
+                "Multa (R$)": round(multa, 2),
+                "Bônus (R$)": round(bonus, 2),
+            })
 
     df_metricas = pd.DataFrame(metricas)
     df_metricas["Total Multa Projeto (R$)"] = round(total_multa_projeto, 2)
@@ -71,22 +70,10 @@ def calcular_metricas(df, disponibilidade_contratual, fator_multa, fator_bonus, 
     
     return df_metricas
 
-# Função para calcular a probabilidade de atingir um valor de multa
-def calcular_prob_multa(df_metricas, valor_multa, disponibilidade_contratual, fator_multa, pmd, mwh_anual_parque):
-    media_disponibilidade = df_metricas["Disponibilidade Média Anual (%)"].mean()
-    desvio_padrao_disponibilidade = df_metricas["Disponibilidade Média Anual (%)"].std()
-    
-    def multa(disponibilidade):
-        if disponibilidade < disponibilidade_contratual:
-            return fator_multa * pmd * mwh_anual_parque * ((disponibilidade_contratual / disponibilidade) - 1)
-        return 0
-    
-    # Simulação para estimar a probabilidade
-    num_simulacoes = 10000
-    disponibilidades_simuladas = np.random.normal(media_disponibilidade, desvio_padrao_disponibilidade, num_simulacoes)
-    multas_simuladas = [multa(d) for d in disponibilidades_simuladas if d > 0]
-    prob = np.mean([m > valor_multa for m in multas_simuladas if m is not None])
-    
+# Função para calcular probabilidade empírica de multa do projeto
+def calcular_prob_empirica_multa(df_metricas, valor_multa_desejado):
+    multas_anuais = df_metricas.groupby('Ano')['Multa (R$)'].sum()
+    prob = (multas_anuais > valor_multa_desejado).mean()
     return prob
 
 # Interface do Streamlit
@@ -99,10 +86,8 @@ disponibilidade_contratual = st.sidebar.slider("Disponibilidade Contratual (%)",
 fator_multa = st.sidebar.number_input("Fator de Multa", min_value=0.0, value=1.5)
 fator_bonus = st.sidebar.number_input("Fator de Bônus", min_value=0.0, value=1.2)
 pmd = st.sidebar.number_input("PMD (R$/MWh)", min_value=0.0, value=300.0)
-mwh_por_wtg = st.sidebar.number_input("MWh por WTG/dia", min_value=0.0, value=2.0)
-num_wtg = st.sidebar.number_input("Número de WTGs por Parque", min_value=1, value=10)
+mwh_por_wtg_ano = st.sidebar.number_input("MWh por WTG por Ano", min_value=0.0, value=730.0)
 valor_multa_desejado = st.sidebar.number_input("Valor de Multa para Probabilidade (R$)", min_value=0.0, value=100000.0)
-periodos_mm = st.sidebar.slider("Períodos para Média Móvel", 1, 12, 3)
 
 # Processamento após upload
 if uploaded_file:
@@ -114,7 +99,7 @@ if uploaded_file:
         st.dataframe(df.head())
 
         # Cálculo de métricas
-        df_metricas = calcular_metricas(df, disponibilidade_contratual, fator_multa, fator_bonus, pmd, mwh_por_wtg, num_wtg)
+        df_metricas = calcular_metricas(df, disponibilidade_contratual, fator_multa, fator_bonus, pmd, mwh_por_wtg_ano)
 
         # Exibir métricas
         st.write("### 📈 Métricas dos Parques Eólicos")
@@ -127,59 +112,24 @@ if uploaded_file:
         st.write(f"- **Multa Total**: R$ {total_multa:,.2f}")
         st.write(f"- **Bônus Total**: R$ {total_bonus:,.2f}")
 
-        # Gráfico de disponibilidade por parque
-        fig1 = px.bar(df_metricas, x="Parque", y="Disponibilidade Média Anual (%)", color="Parque",
-                      title="Disponibilidade Média Anual por Parque",
-                      labels={"Disponibilidade Média Anual (%)": "Disponibilidade (%)"})
-        st.plotly_chart(fig1, use_container_width=True)
-        st.write("*Gráfico mostrando a disponibilidade média anual de cada parque eólico.*")
+        # Explicação do cálculo de multa e bônus
+        st.write("### Cálculo de Multa e Bônus")
+        st.write("""
+        - **Multa**: Se a disponibilidade média anual do parque for menor que a disponibilidade contratual, a multa é calculada como:
+        \[
+        \text{Multa} = \text{fator_multa} \times \text{PMD} \times \text{MWh_anual} \times \left( \frac{\text{disponibilidade_contratual}}{\text{disponibilidade_média}} - 1 \right)
+        \]
+        - **Bônus**: Se a disponibilidade média anual do parque for maior ou igual à disponibilidade contratual, o bônus é calculado como:
+        \[
+        \text{Bônus} = \text{fator_bônus} \times \text{PMD} \times \text{MWh_anual} \times \left( \frac{\text{disponibilidade_média}}{\text{disponibilidade_contratual}} - 1 \right)
+        \]
+        """)
 
-        # Gráfico de multas e bônus por parque
-        fig2 = px.bar(df_metricas, x="Parque", y=["Multa (R$)", "Bônus (R$)"], barmode="group",
-                      title="Multas e Bônus Anuais por Parque",
-                      labels={"value": "Valor (R$)", "variable": "Tipo"})
-        st.plotly_chart(fig2, use_container_width=True)
-        st.write("*Gráfico comparando as multas e bônus anuais calculados para cada parque.*")
-
-        # Probabilidade de atingir um valor de multa
-        mwh_anual_parque = mwh_por_wtg * 365 * num_wtg
-        prob_multa = calcular_prob_multa(df_metricas, valor_multa_desejado, disponibilidade_contratual, fator_multa, pmd, mwh_anual_parque)
-        st.write(f"### Probabilidade de Multa Superior a R$ {valor_multa_desejado:,.2f}")
+        # Probabilidade empírica de multa do projeto
+        prob_multa = calcular_prob_empirica_multa(df_metricas, valor_multa_desejado)
+        st.write(f"### Probabilidade de Multa Total do Projeto Superior a R$ {valor_multa_desejado:,.2f}")
         st.write(f"Probabilidade: **{prob_multa * 100:.2f}%**")
-        st.write("*Esta probabilidade é calculada simulando a distribuição das disponibilidades médias anuais (assumidas como normais) e verificando em quantos casos a multa total ultrapassa o valor especificado.*")
-
-        # Série temporal
-        df_melted = df.melt(id_vars=["Windfarm"], var_name="Data", value_name="Disponibilidade")
-        df_melted["Data"] = pd.to_datetime(df_melted["Data"], errors='coerce')
-        df_melted = df_melted.dropna()
-
-        if not df_melted.empty:
-            st.write("### 📅 Análise Temporal")
-            parque_selecionado = st.selectbox("Selecione um parque para análise:", df_melted["Windfarm"].unique())
-            df_filtrado = df_melted[df_melted["Windfarm"] == parque_selecionado].groupby("Data")["Disponibilidade"].mean().dropna()
-            df_filtrado = df_filtrado.to_frame()
-            df_filtrado["Média Móvel"] = df_filtrado["Disponibilidade"].rolling(window=periodos_mm, min_periods=1).mean()
-
-            fig3 = px.line(df_filtrado, x=df_filtrado.index, y=["Disponibilidade", "Média Móvel"],
-                           title=f"Evolução da Disponibilidade - {parque_selecionado}",
-                           labels={"value": "Disponibilidade (%)", "variable": "Métrica"})
-            st.plotly_chart(fig3, use_container_width=True)
-            st.write("*Gráfico da disponibilidade diária e sua média móvel ao longo do tempo para o parque selecionado.*")
-
-            # Decomposição sazonal
-            if len(df_filtrado) >= periodos_mm * 2:
-                st.write("### 🔬 Análise de Curva Sazonal")
-                decomposed = seasonal_decompose(df_filtrado["Disponibilidade"], model="additive", period=periodos_mm)
-                st.line_chart(decomposed.trend.rename("Tendência"))
-                st.write("*Tendência: Componente de longo prazo da disponibilidade.*")
-                st.line_chart(decomposed.seasonal.rename("Sazonalidade"))
-                st.write("*Sazonalidade: Padrões recorrentes na disponibilidade.*")
-                st.line_chart(decomposed.resid.rename("Resíduos"))
-                st.write("*Resíduos: Variações aleatórias após remover tendência e sazonalidade.*")
-
-        # Download dos resultados
-        csv_data = df_metricas.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Baixar Resultados em CSV", data=csv_data, file_name="analise_parques_eolicos.csv", mime="text/csv")
+        st.write("*Esta probabilidade é calculada com base na frequência histórica de anos em que a soma das multas dos parques ultrapassou o valor especificado.*")
 
 else:
     st.warning("📌 Por favor, faça o upload de um arquivo Excel para iniciar a análise.")
