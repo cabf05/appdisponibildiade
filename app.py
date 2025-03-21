@@ -173,7 +173,7 @@ def main():
     dist_selecionada = st.selectbox(
         "Distribuição para Simulação:",
         dist_opcoes,
-        index=dist_opcoes.index(dist_sugerida)
+        index=dist_opcoes.index(dist_sugerida))
     
     num_simulacoes = st.number_input("Número de Simulações", 1000, 100000, 10000, step=1000)
     valor_alvo = st.number_input("Valor Alvo de Multa (R$)", 0.0, 1e9, 50000.0)
