@@ -216,7 +216,7 @@ def main():
             progress_bar.progress((i + 1) / num_simulacoes)
         
         # Resultados
-        probabilidade = (np.sum(np.array(multas_totais) > valor_alvo) / num_simulacoes * 100
+        probabilidade = (np.sum(np.array(multas_totais) > valor_alvo)) / num_simulacoes * 100
         
         st.subheader("Resultados da Simulação")
         col_res1, col_res2 = st.columns(2)
