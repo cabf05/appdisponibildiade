@@ -146,7 +146,7 @@ def main():
             progress_bar.progress((i + 1) / num_simulacoes)
 
         # Calcular probabilidade
-        probabilidade = (np.sum(np.array(multas_totais) > valor_alvo) / num_simulacoes * 100
+        probabilidade = (np.sum(np.array(multas_totais) > valor_alvo) / num_simulacoes) * 100
         
         # Exibir resultados
         st.markdown(f"""
